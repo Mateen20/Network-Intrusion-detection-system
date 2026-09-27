@@ -5,7 +5,8 @@ and extracts ML-ready features from each completed flow.
 
 import time
 import threading
-from collections import Counter, defaultdict
+import math
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 
 FLOW_TIMEOUT = 30.0   # seconds of inactivity before flow is finalised
@@ -28,24 +29,30 @@ class Flow:
     start_time:    float = field(default_factory=time.time)
     last_seen:     float = field(default_factory=time.time)
     pkt_count:     int   = 0
+    src_pkt_count: int   = 0
     src_bytes:     int   = 0
     dst_bytes:     int   = 0
     syn_count:     int   = 0
+    syn_ack_count: int   = 0
     fin_count:     int   = 0
     rst_count:     int   = 0
     urg_count:     int   = 0
     wrong_frags:   int   = 0
     same_srv:      int   = 0
     diff_srv:      int   = 0
+    connection_stats: dict = field(default_factory=dict)
+    connection_record: dict | None = None
 
-    def update(self, pkt_size: int, is_src: bool, flags: dict):
+    def update(self, pkt_size: int, is_src: bool, flags: dict, timestamp: float):
         self.pkt_count  += 1
-        self.last_seen   = time.time()
+        self.last_seen   = max(self.last_seen, timestamp)
         if is_src:
+            self.src_pkt_count += 1
             self.src_bytes += pkt_size
         else:
             self.dst_bytes += pkt_size
-        self.syn_count  += int(flags.get("SYN", False))
+        self.syn_count  += int(flags.get("SYN", False) and not flags.get("ACK", False))
+        self.syn_ack_count += int(flags.get("SYN", False) and flags.get("ACK", False))
         self.fin_count  += int(flags.get("FIN", False))
         self.rst_count  += int(flags.get("RST", False))
         self.urg_count  += int(flags.get("URG", False))
@@ -60,8 +67,9 @@ class Flow:
     def to_features(self, global_stats: dict) -> dict:
         """Convert a flow into the exact named feature vector expected by the trained model."""
         duration  = max(self.duration, 0.001)
-        pkt_rate  = self.pkt_count / duration
-        byte_rate = (self.src_bytes + self.dst_bytes) / duration
+        rate_duration = max(duration, 1.0)
+        pkt_rate  = float(global_stats.get("conn_rate", 0.0))
+        byte_rate = (self.src_bytes + self.dst_bytes) / rate_duration
         pkt_cnt   = max(self.pkt_count, 1)
 
         same_total = max(global_stats.get("same_srv_total", 1), 1)
@@ -78,7 +86,7 @@ class Flow:
             "urgent":                 float(self.urg_count),
             "count":                  float(global_stats.get("conn_2s", 1)),
             "srv_count":              float(global_stats.get("srv_2s", 1)),
-            "serror_rate":            float(self.syn_count / pkt_cnt),
+            "serror_rate":            float(self.syn_count > 0 and self.syn_ack_count == 0),
             "rerror_rate":            float(self.rst_count / pkt_cnt),
             "same_srv_rate":          same_srv_rate,
             "diff_srv_rate":          diff_srv_rate,
@@ -89,11 +97,11 @@ class Flow:
             "dst_host_serror_rate":   float(global_stats.get("dst_host_serror_rate", 0.0)),
             "packet_rate":            float(pkt_rate),
             "byte_rate":              float(byte_rate),
-            "flag_syn_ratio":         float(self.syn_count / pkt_cnt),
+            "flag_syn_ratio":         float(self.syn_count / max(self.src_pkt_count, 1)),
             "flag_fin_ratio":         float(self.fin_count / pkt_cnt),
             "flag_rst_ratio":         float(self.rst_count / pkt_cnt),
             "port_number":            float(self.dst_port),
-            "is_well_known_port":     float(1.0 if self.dst_port < 1024 else 0.0),
+            "is_well_known_port":     float(1.0 if 0 < self.dst_port < 1024 else 0.0),
         }
 
         feature_names = _canonical_feature_names()
@@ -108,9 +116,9 @@ class FlowTracker:
         self._flows:  dict[tuple, Flow] = {}
         self._lock = threading.RLock()
         self._history: list[dict]       = []   # recent completed flows
-        self._conn_window: list[float]  = []   # timestamps for 2-sec window
-        self._dst_host_log: dict        = defaultdict(Counter)
-        self._dst_host_stats: dict      = defaultdict(lambda: {"total": 0, "syn": 0})
+        self._conn_window: list[dict]   = []   # connection starts in 2-sec window
+        self._connection_history: deque[dict] = deque(maxlen=512)
+        self._completed_flows: list[Flow] = []
         self.last_feature_vector: dict | None = None
         self.last_feature_debug: dict | None = None
 
@@ -128,56 +136,83 @@ class FlowTracker:
         key     = self._flow_key(pkt_info)
         rev_key = self._flow_key(pkt_info, reverse=True)
 
-        now = time.time()
-        self._conn_window = [t for t in self._conn_window if now - t < 2.0]
-        self._conn_window.append(now)
+        timestamp = self._packet_timestamp(pkt_info)
+        self._conn_window = [
+            connection for connection in self._conn_window
+            if 0.0 <= timestamp - connection["timestamp"] < 2.0
+        ]
+        completed_flow = self._queue_expired_flows()
 
         # Look up existing flow
         if key in self._flows:
             flow = self._flows[key]
             is_src = True
+            new_connection = False
         elif rev_key in self._flows:
             flow   = self._flows[rev_key]
             key    = rev_key
             is_src = False
+            new_connection = False
         else:
             # New flow
+            src_port = pkt_info.get("src_port", 0)
+            dst_port = pkt_info.get("dst_port", 0)
+            reverse_initial_packet = 0 < src_port < 1024 and dst_port >= 1024
             flow = Flow(
-                src_ip   = pkt_info.get("src_ip",   "0.0.0.0"),
-                dst_ip   = pkt_info.get("dst_ip",   "0.0.0.0"),
-                src_port = pkt_info.get("src_port", 0),
-                dst_port = pkt_info.get("dst_port", 0),
+                src_ip   = pkt_info.get("dst_ip" if reverse_initial_packet else "src_ip", "0.0.0.0"),
+                dst_ip   = pkt_info.get("src_ip" if reverse_initial_packet else "dst_ip", "0.0.0.0"),
+                src_port = dst_port if reverse_initial_packet else src_port,
+                dst_port = src_port if reverse_initial_packet else dst_port,
                 protocol = pkt_info.get("protocol", 0),
+                start_time = timestamp,
+                last_seen = timestamp,
             )
+            key = self._flow_key(pkt_info, reverse=reverse_initial_packet)
             self._flows[key] = flow
-            is_src = True
+            is_src = not reverse_initial_packet
+            new_connection = True
+
+        if new_connection:
+            record = {
+                "timestamp": timestamp,
+                "dst_ip": flow.dst_ip,
+                "dst_port": flow.dst_port,
+                "protocol": flow.protocol,
+                "failed": False,
+            }
+            flow.connection_record = record
+            self._conn_window.append(record)
+            self._connection_history.append(record)
 
         flow.update(
             pkt_size = pkt_info.get("size", 0),
             is_src   = is_src,
             flags    = pkt_info.get("flags", {}),
+            timestamp = timestamp,
         )
+        if flow.connection_record is not None:
+            flow.connection_record["failed"] = bool(
+                flow.syn_count and flow.rst_count and not flow.syn_ack_count
+            )
+        flow.connection_stats = self._global_stats(flow, timestamp)
 
-        # Track destination host statistics
-        dst = pkt_info.get("dst_ip", "")
-        self._dst_host_log[dst][pkt_info.get("dst_port", 0)] += 1
-        self._dst_host_stats[dst]["total"] += 1
-        if pkt_info.get("flags", {}).get("SYN", False):
-            self._dst_host_stats[dst]["syn"] += 1
-
-        # Check for expired flows
-        return self._expire_flow(key)
+        return completed_flow
 
     def collect_expired(self) -> list[tuple[Flow, dict]]:
         """Return and remove all expired flows as (flow, features) pairs."""
         with self._lock:
-            expired_keys = [k for k, f in list(self._flows.items()) if f.is_expired()]
+            self._queue_expired_flows()
             results = []
-            for key in expired_keys:
-                flow = self._flows.pop(key, None)
-                if flow is None:
-                    continue
-                stats = self._global_stats(flow)
+            completed = self._completed_flows
+            self._completed_flows = []
+            for flow in completed:
+                if flow.connection_record is not None and flow.syn_count and not flow.syn_ack_count:
+                    flow.connection_record["failed"] = True
+                stats = dict(flow.connection_stats)
+                if flow.connection_record is not None and flow.connection_record["failed"]:
+                    stats["dst_host_serror_rate"] = max(
+                        stats.get("dst_host_serror_rate", 0.0), 1.0
+                    )
                 features = flow.to_features(stats)
                 self.last_feature_vector = features
                 self.last_feature_debug = {"flow": flow.__dict__.copy(), "stats": stats}
@@ -195,37 +230,66 @@ class FlowTracker:
 
     # ─── Internal ─────────────────────────────────────────────────────────────
 
-    def _expire_flow(self, key: tuple) -> Flow | None:
-        flow = self._flows.get(key)
-        if flow and flow.is_expired() and flow.pkt_count > 0:
-            return self._flows.pop(key)
-        return None
+    def _queue_expired_flows(self) -> Flow | None:
+        first_completed = None
+        expired_keys = [key for key, flow in self._flows.items() if flow.is_expired()]
+        for key in expired_keys:
+            flow = self._flows.pop(key, None)
+            if flow is None or flow.pkt_count == 0:
+                continue
+            self._completed_flows.append(flow)
+            if first_completed is None:
+                first_completed = flow
+        return first_completed
 
-    def _global_stats(self, flow: Flow) -> dict:
-        dst = flow.dst_ip
-        port_counts = self._dst_host_log.get(dst, Counter())
-        total_service_hits = sum(port_counts.values())
-        same_srv = float(port_counts.get(flow.dst_port, 0))
-        diff_srv = max(total_service_hits - same_srv, 0.0)
-        same_total = max(same_srv + diff_srv, 1.0)
-
-        host_stats = self._dst_host_stats.get(dst, {"total": 0, "syn": 0})
-        total_host = max(host_stats.get("total", 0), 1)
-        syn_total = float(host_stats.get("syn", 0))
+    def _global_stats(self, flow: Flow, timestamp: float) -> dict:
+        recent_connections = [
+            connection for connection in self._connection_history
+            if 0.0 <= timestamp - connection["timestamp"] < 2.0
+        ]
+        host_connections = [
+            connection for connection in self._connection_history
+            if connection["dst_ip"] == flow.dst_ip
+        ]
+        same_service = [
+            connection for connection in host_connections
+            if connection["dst_port"] == flow.dst_port
+            and connection["protocol"] == flow.protocol
+        ]
+        same_recent_service = [
+            connection for connection in recent_connections
+            if connection["dst_ip"] == flow.dst_ip
+            and connection["dst_port"] == flow.dst_port
+            and connection["protocol"] == flow.protocol
+        ]
+        recent_host = [
+            connection for connection in recent_connections
+            if connection["dst_ip"] == flow.dst_ip
+        ]
+        same_total = max(len(recent_host), 1)
 
         return {
-            "conn_2s":               len(self._conn_window),
-            "srv_2s":                max(len(self._conn_window) // 2, 1),
-            "dst_host_count":        len(self._dst_host_log),
-            "dst_host_srv_count":    float(len(port_counts) or 1),
-            "dst_host_same_srv_rate": same_srv / same_total,
-            "dst_host_diff_srv_rate": diff_srv / same_total,
-            "dst_host_serror_rate":  syn_total / total_host,
-            "same_srv_total":        same_srv,
-            "diff_srv_total":        diff_srv,
-            "same_srv_rate":         same_srv / same_total,
-            "diff_srv_rate":         diff_srv / same_total,
+            "conn_2s":               len(recent_host),
+            "srv_2s":                max(len(same_recent_service), 1),
+            "dst_host_count":        min(len(host_connections), 255),
+            "dst_host_srv_count":    min(len(same_service), 255),
+            "dst_host_same_srv_rate": len(same_service) / max(len(host_connections), 1),
+            "dst_host_diff_srv_rate": max(len(host_connections) - len(same_service), 0) / max(len(host_connections), 1),
+            "dst_host_serror_rate":  sum(c["failed"] for c in host_connections) / max(len(host_connections), 1),
+            "same_srv_total":        len(same_recent_service),
+            "diff_srv_total":        max(len(recent_host) - len(same_recent_service), 0),
+            "same_srv_rate":         len(same_recent_service) / same_total,
+            "diff_srv_rate":         max(len(recent_host) - len(same_recent_service), 0) / same_total,
+            "conn_rate":             len(recent_host) / 2.0,
         }
+
+    @staticmethod
+    def _packet_timestamp(pkt_info: dict) -> float:
+        try:
+            timestamp = float(pkt_info.get("ts", time.time()))
+        except (TypeError, ValueError):
+            return time.time()
+        return timestamp if math.isfinite(timestamp) and timestamp > 0 else time.time()
 
     @staticmethod
     def _flow_key(pkt: dict, reverse: bool = False) -> tuple:

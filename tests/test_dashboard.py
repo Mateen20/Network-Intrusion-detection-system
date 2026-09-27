@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 import dashboard.app as dashboard
 
 
@@ -42,7 +44,8 @@ class FakeAlertManager:
             "high": 1,
             "medium": 0,
             "top_sources": [{"ip": "10.0.0.4", "count": 1}],
-            "attack_types": {"web_attack": 1, "exploit": 1},
+            "attack_types": {"web_attack": 1},
+            "uncertain": 1,
             "total_alerts": 2,
         }
 
@@ -88,14 +91,44 @@ def test_dashboard_stats_keep_packet_flow_and_alert_counts_distinct():
     assert stats["normal_flows"] == 1
     assert stats["suspicious_flows"] == 2
     assert stats["uncertain"] == 1
+    assert stats["confirmed_attack_types"] == {"web_attack": 1}
+    assert stats["threat_level"] == "HIGH"
     assert stats["confidence_avg"] == 66.5
     assert stats["top_destinations"] == [{"ip": "10.0.0.8", "count": 2}]
     assert stats["capture_running"] is True
 
 
+def test_attack_distribution_has_separate_confirmed_uncertain_and_normal_categories():
+    setup_dashboard()
+
+    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+
+    assert "'Uncertain','Normal'" in html
+    assert "s.uncertain ?? 0, s.normal_flows ?? s.clean ?? 0" in html
+    assert "HIGH RISK" in html
+    assert "MEDIUM RISK" in html
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ({}, "SECURE"),
+        ({"uncertain": 5}, "SECURE"),
+        ({"medium": 1}, "MEDIUM"),
+        ({"high": 1}, "HIGH"),
+        ({"critical": 1}, "CRITICAL"),
+        ({"medium": 1, "high": 1}, "HIGH"),
+        ({"high": 1, "critical": 1}, "CRITICAL"),
+    ],
+)
+def test_threat_level_uses_confirmed_severity_only(counts, expected):
+    assert dashboard._threat_level(counts) == expected
+
+
 def test_dashboard_pdf_download_uses_current_session():
     setup_dashboard()
     reports_dir = Path(dashboard.__file__).resolve().parents[1] / "reports"
+    reports_dir.mkdir(exist_ok=True)
     files_before = set(reports_dir.iterdir())
 
     response = dashboard.app.test_client().get("/api/report")

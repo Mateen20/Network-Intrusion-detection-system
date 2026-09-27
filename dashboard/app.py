@@ -154,6 +154,16 @@ def _fmt_uptime(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _threat_level(stats: dict) -> str:
+    if int(stats.get("critical", 0)) > 0:
+        return "CRITICAL"
+    if int(stats.get("high", 0)) > 0:
+        return "HIGH"
+    if int(stats.get("medium", 0)) > 0:
+        return "MEDIUM"
+    return "SECURE"
+
+
 def _dashboard_stats() -> dict:
     stats = dict(_alert_manager.dashboard_stats())
     alerts = _alert_manager.recent_alerts(500)
@@ -168,9 +178,12 @@ def _dashboard_stats() -> dict:
     stats["suspicious_flows"] = max(
         stats["completed_flows"] - stats["normal_flows"], 0
     )
-    stats["uncertain"] = sum(
-        1 for alert in alerts if alert.get("severity") == "UNCERTAIN"
-    )
+    stats["uncertain"] = int(stats.get("uncertain", sum(
+        1 for alert in alerts
+        if str(alert.get("severity", "")).upper() == "UNCERTAIN"
+    )))
+    stats["confirmed_attack_types"] = dict(stats.get("attack_types", {}))
+    stats["threat_level"] = _threat_level(stats)
     stats["total_alerts"] = int(stats.get("total_alerts", len(alerts)))
     stats["capture_running"] = bool(
         _capture_ref is not None

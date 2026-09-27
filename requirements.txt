@@ -1,4 +1,4 @@
-# NIDS — AI-Powered Network Intrusion Detection System
+# NIDS — Network Intrusion Detection System
 # pip install -r requirements.txt
 
 # Core ML
@@ -19,4 +19,4 @@ flask-socketio>=5.3.0
 reportlab>=4.0.0
 
 # Terminal UI
-rich>=13.0.0
+rich>=13.0.0python main.py run --mode live --iface auto

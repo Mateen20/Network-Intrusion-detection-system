@@ -79,40 +79,82 @@ def select_interface(requested: str, interfaces: list[dict]) -> dict:
 
 # ─── Simulation Config ────────────────────────────────────────────────────────
 NORMAL_HOSTS = [f"192.168.1.{i}" for i in range(2, 30)]
-ATTACK_HOSTS = [f"10.0.{random.randint(0,255)}.{random.randint(1,254)}"
-                for _ in range(10)]
 SERVER_IP    = "192.168.1.1"
-SERVICES     = {80: "HTTP", 443: "HTTPS", 22: "SSH",
-                25: "SMTP", 53: "DNS",  3306: "MySQL"}
 
-ATTACK_TEMPLATES = {
+SIMULATION_PROFILES = {
+    "normal": {
+        "sources": 1, "connections": 28, "packets": 8,
+        "ports": (443,), "protocols": (0,),
+        "request_size": (80, 1200), "response_size": (1200, 3500),
+        "reply_every": 2, "interval": 0.005,
+        "request_flags": {"ACK": True}, "response_flags": {"ACK": True},
+    },
     "dos": {
-        "description": "SYN Flood / DoS Attack",
-        "pkt_rate":    800,
-        "size_range":  (40, 80),
-        "flags":       {"SYN": True},
-        "dst_port":    80,
+        "sources": 1, "connections": 128, "packets": 1,
+        "ports": (80,), "protocols": (0,),
+        "request_size": (100, 200), "reply_every": 0, "interval": 0.015,
+        "request_flags": {"SYN": True},
     },
-    "probe": {
-        "description": "Port Scan",
-        "pkt_rate":    200,
-        "size_range":  (40, 60),
-        "flags":       {"SYN": True, "RST": False},
-        "dst_port":    None,   # random
+    "ddos": {
+        "sources": 16, "connections": 220, "packets": 1,
+        "ports": (80,), "protocols": (0,),
+        "request_size": (40, 70), "reply_every": 0, "interval": 0.008,
+        "request_flags": {"SYN": True},
     },
-    "r2l": {
-        "description": "Remote-to-Local (Credential Brute Force)",
-        "pkt_rate":    30,
-        "size_range":  (200, 500),
-        "flags":       {"SYN": False, "ACK": True},
-        "dst_port":    22,
+    "port_scan": {
+        "sources": 1, "connections": 18, "packets": 2,
+        "ports": (21, 22, 23, 25, 53, 80, 110, 139, 443, 445, 3306, 3389,
+                  5432, 5900, 8080, 8443, 27017, 31337),
+        "protocols": (0,), "request_size": (40, 60), "response_size": (40, 60),
+        "reply_every": 2, "interval": 0.04,
+        "request_flags": {"SYN": True}, "response_flags": {"RST": True},
     },
-    "u2r": {
-        "description": "Privilege Escalation",
-        "pkt_rate":    5,
-        "size_range":  (1000, 4000),
-        "flags":       {"FIN": True},
-        "dst_port":    23,
+    "vuln_scan": {
+        "sources": 1, "connections": 48, "packets": 4,
+        "ports": (21, 22, 23, 25, 80, 443, 445, 3306), "protocols": (0,),
+        "request_size": (40, 180), "response_size": (80, 220),
+        "reply_every": 2, "interval": 0.025,
+        "request_flags": {"ACK": True}, "response_flags": {"RST": True},
+    },
+    "brute_force": {
+        "sources": 1, "connections": 160, "packets": 5,
+        "ports": (22,), "protocols": (0,),
+        "request_size": (250, 1200), "response_size": (40, 300),
+        "reply_every": 2, "interval": 0.002,
+        "request_flags": {"ACK": True}, "response_flags": {"RST": True},
+        "final_flags": {"FIN": True},
+    },
+    "exploit": {
+        "sources": 1, "connections": 1, "packets": 6,
+        "ports": (445,), "protocols": (0,),
+        "request_size": (5000, 25000), "response_size": (2000, 6000),
+        "reply_every": 3, "interval": 0.4,
+        "request_flags": {"ACK": True, "URG": True},
+        "response_flags": {"ACK": True},
+        "final_flags": {"FIN": True},
+    },
+    "web_attack": {
+        "sources": 1, "connections": 40, "packets": 4,
+        "ports": (80,), "protocols": (0,),
+        "request_size": (300, 1000), "response_size": (800, 2500),
+        "reply_every": 2, "interval": 0.008,
+        "request_flags": {"ACK": True}, "response_flags": {"ACK": True},
+        "final_flags": {"FIN": True},
+    },
+    "infiltration": {
+        "sources": 1, "connections": 1, "packets": 12,
+        "ports": (31337,), "protocols": (0,),
+        "request_size": (40, 120), "response_size": (40, 100),
+        "reply_every": 4, "interval": 0.18,
+        "request_flags": {"ACK": True}, "response_flags": {"ACK": True},
+    },
+    "exfiltration": {
+        "sources": 1, "connections": 1, "packets": 8,
+        "ports": (443,), "protocols": (0,),
+        "destination": "198.51.100.20",
+        "request_size": (50000, 200000), "response_size": (1000, 5000),
+        "reply_every": 4, "interval": 0.08,
+        "request_flags": {"ACK": True}, "response_flags": {"ACK": True},
     },
 }
 
@@ -257,81 +299,103 @@ class PacketCapture:
 
     def _simulate(self):
         """
-        Generates a realistic mix of normal + attack traffic.
-        Attack bursts are injected every 15–30 seconds.
+        Generates normal sessions and cycles through distinct attack behaviors.
         """
-        next_attack = time.time() + random.uniform(10, 20)
+        next_attack = time.time() + random.uniform(4, 8)
+        attack_types = [name for name in SIMULATION_PROFILES if name != "normal"]
+        random.shuffle(attack_types)
+        attack_index = 0
 
         while self._running:
             now = time.time()
 
-            # Inject attack burst?
             if now >= next_attack:
-                attack_type = random.choice(list(ATTACK_TEMPLATES.keys()))
-                self._inject_attack(attack_type, duration=random.uniform(3, 8))
-                next_attack = now + random.uniform(15, 35)
+                attack_type = attack_types[attack_index]
+                attack_index = (attack_index + 1) % len(attack_types)
+                self._inject_attack(attack_type)
+                next_attack = now + random.uniform(8, 15)
 
-            # Normal packet
-            pkt = self._make_normal_pkt()
-            self.stats["total"] += 1
-            if self.callback:
-                self.callback(pkt)
-            time.sleep(random.expovariate(50))   # ~50 pkts/sec normal rate
+            for pkt in self._make_scenario_packets("normal"):
+                if not self._running:
+                    break
+                pkt["ts"] = time.time()
+                self.stats["total"] += 1
+                if self.callback:
+                    self.callback(pkt)
+                time.sleep(SIMULATION_PROFILES["normal"]["interval"])
 
-    def _inject_attack(self, attack_type: str, duration: float):
-        tmpl      = ATTACK_TEMPLATES[attack_type]
-        attacker  = random.choice(ATTACK_HOSTS)
-        end_time  = time.time() + duration
-        rate      = tmpl["pkt_rate"]
-        sleep_t   = 1.0 / rate
+    def _inject_attack(self, attack_type: str):
+        profile = SIMULATION_PROFILES[attack_type]
 
         def _burst():
-            while self._running and time.time() < end_time:
-                pkt = self._make_attack_pkt(attacker, tmpl)
-                self.stats["total"]           += 1
+            for pkt in self._make_scenario_packets(attack_type):
+                if not self._running:
+                    break
+                pkt["ts"] = time.time()
+                self.stats["total"] += 1
                 self.stats["attacks_injected"] += 1
                 if self.callback:
                     self.callback(pkt)
-                time.sleep(sleep_t)
+                time.sleep(profile["interval"])
 
         t = threading.Thread(target=_burst, daemon=True)
         t.start()
+        return t
 
     @staticmethod
-    def _make_normal_pkt() -> dict:
-        src  = random.choice(NORMAL_HOSTS)
-        dst  = SERVER_IP
-        port = random.choice(list(SERVICES.keys()))
-        proto = random.choices([0, 1, 2], weights=[60, 35, 5])[0]
-        return {
-            "src_ip":   src,
-            "dst_ip":   dst,
-            "src_port": random.randint(1024, 65535),
-            "dst_port": port,
-            "protocol": proto,
-            "size":     random.randint(40, 1500),
-            "flags":    {
-                "SYN": random.random() < 0.1,
-                "ACK": random.random() < 0.7,
-                "FIN": random.random() < 0.05,
-                "RST": random.random() < 0.02,
-                "URG": False,
-            },
-            "ts": time.time(),
-        }
+    def _make_scenario_packets(scenario: str) -> list[dict]:
+        profile = SIMULATION_PROFILES[scenario]
+        source_ips = set()
+        while len(source_ips) < profile["sources"]:
+            source_ips.add(
+                random.choice(NORMAL_HOSTS)
+                if scenario == "normal"
+                else f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
+            )
+        source_ips = list(source_ips)
+        packets = []
 
-    @staticmethod
-    def _make_attack_pkt(attacker: str, tmpl: dict) -> dict:
-        lo, hi = tmpl["size_range"]
-        port   = tmpl["dst_port"] or random.randint(1, 65535)
-        return {
-            "src_ip":   attacker,
-            "dst_ip":   SERVER_IP,
-            "src_port": random.randint(1024, 65535),
-            "dst_port": port,
-            "protocol": 0,
-            "size":     random.randint(lo, hi),
-            "flags":    tmpl["flags"].copy(),
-            "ts":       time.time(),
-            "_attack":  True,
-        }
+        for connection_index in range(profile["connections"]):
+            source_ip = source_ips[connection_index % len(source_ips)]
+            destination_ip = profile.get("destination", SERVER_IP)
+            source_port = random.randint(1024, 65535)
+            destination_port = profile["ports"][connection_index % len(profile["ports"])]
+            protocol = random.choice(profile["protocols"])
+
+            for packet_index in range(profile["packets"]):
+                if scenario == "normal":
+                    is_reply = packet_index == 1 or packet_index % 2 == 1
+                    handshake_flags = (
+                        {"SYN": True},
+                        {"SYN": True, "ACK": True},
+                        {"ACK": True},
+                    )
+                    flags = (
+                        handshake_flags[packet_index]
+                        if packet_index < len(handshake_flags)
+                        else {"ACK": True}
+                    )
+                else:
+                    is_reply = (
+                        profile.get("reply_every", 0) > 0
+                        and (packet_index + 1) % profile["reply_every"] == 0
+                    )
+                    flag_key = "response_flags" if is_reply else "request_flags"
+                    flags = profile.get(flag_key, {}).copy()
+                    if packet_index == profile["packets"] - 1:
+                        flags.update(profile.get("final_flags", {}))
+                src_ip, dst_ip = (destination_ip, source_ip) if is_reply else (source_ip, destination_ip)
+                src_port, dst_port = (destination_port, source_port) if is_reply else (source_port, destination_port)
+                size_range = profile.get("response_size") if is_reply else profile["request_size"]
+                packets.append({
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "protocol": protocol,
+                    "size": random.randint(*size_range),
+                    "flags": flags,
+                    "ts": time.time(),
+                })
+
+        return packets

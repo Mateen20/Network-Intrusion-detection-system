@@ -262,6 +262,8 @@
   }
   .threat-level.CRITICAL { --ring-clr: var(--red); }
   .threat-level.HIGH     { --ring-clr: var(--amber); }
+  .threat-level.MEDIUM   { --ring-clr: var(--blue); }
+  .threat-level.UNCERTAIN { --ring-clr: var(--muted); }
   .threat-level.LOW      { --ring-clr: var(--green); }
   .threat-level.CLEAN    { --ring-clr: var(--accent); }
 
@@ -639,15 +641,16 @@ const trafficChart = new Chart(
 // ── Attack Donut ─────────────────────────────────────────────────────────────
 const ATTACK_LABELS = [
   'DoS','DDoS','Port Scan','Vuln Scan',
-  'Brute Force','Exploit','Web Attack','Infiltration','Exfiltration','Normal'
+  'Brute Force','Exploit','Web Attack','Infiltration','Exfiltration',
+  'Uncertain','Normal'
 ];
 const ATTACK_COLOURS = [
   '#ef4444','#dc2626','#3b82f6','#60a5fa',
-  '#f59e0b','#8b5cf6','#ec4899','#f97316','#14b8a6','#10b981'
+  '#f59e0b','#8b5cf6','#ec4899','#f97316','#14b8a6','#64748b','#10b981'
 ];
 const ATTACK_KEYS = [
   'dos','ddos','port_scan','vuln_scan',
-  'brute_force','exploit','web_attack','infiltration','exfiltration','normal'
+  'brute_force','exploit','web_attack','infiltration','exfiltration'
 ];
 const attackChart = new Chart(
   document.getElementById('attack-chart').getContext('2d'),
@@ -656,7 +659,7 @@ const attackChart = new Chart(
     data: {
       labels: ATTACK_LABELS,
       datasets: [{
-        data: new Array(10).fill(0),
+        data: new Array(11).fill(0),
         backgroundColor: ATTACK_COLOURS,
         borderWidth: 0,
         hoverOffset: 6,
@@ -705,13 +708,16 @@ function updateStats(s) {
   }
   trafficChart.update('none');
 
-  // Attack donut — 10 classes
-  const types = s.attack_types ?? {};
-  attackChart.data.datasets[0].data = ATTACK_KEYS.map(k => types[k] ?? 0);
+  // Keep model-confirmed classes separate from uncertain predictions and normal flows.
+  const types = s.confirmed_attack_types ?? s.attack_types ?? {};
+  const confirmed = ATTACK_KEYS.map(k => types[k] ?? 0);
+  attackChart.data.datasets[0].data = [
+    ...confirmed, s.uncertain ?? 0, s.normal_flows ?? s.clean ?? 0,
+  ];
   attackChart.update('none');
 
-  const totalThreats = threats;
-  setText('attack-total-badge', totalThreats + ' threats');
+  const totalConfirmed = confirmed.reduce((sum, count) => sum + count, 0);
+  setText('attack-total-badge', `${totalConfirmed} confirmed · ${s.uncertain ?? 0} uncertain`);
 
   // Threat pulse
   updatePulse(s);
@@ -724,18 +730,21 @@ function updatePulse(s) {
   const rings = document.getElementById('pulse-rings');
   const core  = document.getElementById('pulse-core');
   const label = document.getElementById('pulse-label');
-  const crit  = s.critical ?? 0;
-  const high  = s.high ?? 0;
+  const threatLevel = s.threat_level ?? 'SECURE';
 
   rings.className = 'pulse-rings threat-level ';
-  if (crit > 0) {
+  if (threatLevel === 'CRITICAL') {
     rings.className += 'CRITICAL';
     core.textContent  = '⚠️';
     label.textContent = 'CRITICAL THREAT';
-  } else if (high > 0) {
+  } else if (threatLevel === 'HIGH') {
     rings.className += 'HIGH';
     core.textContent  = '🔶';
-    label.textContent = 'HIGH ALERT';
+    label.textContent = 'HIGH RISK';
+  } else if (threatLevel === 'MEDIUM') {
+    rings.className += 'MEDIUM';
+    core.textContent  = '⚠️';
+    label.textContent = 'MEDIUM RISK';
   } else {
     rings.className += 'CLEAN';
     core.textContent  = '🛡️';

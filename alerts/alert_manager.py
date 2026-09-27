@@ -130,7 +130,8 @@ class AlertManager:
         self._alerts.appendleft(alert)
         self._alert_keys.add(event_key)
         self._stats[alert.severity]   += 1
-        self._attack_counts[alert.label] += 1
+        if alert.severity in {"CRITICAL", "HIGH", "MEDIUM"}:
+            self._attack_counts[alert.label] += 1
         self._src_ip_counts[alert.src_ip] += 1
         return alert
 
@@ -155,7 +156,12 @@ class AlertManager:
             "high":            self._stats.get("HIGH", 0),
             "medium":          self._stats.get("MEDIUM", 0),
             "low":             self._stats.get("LOW", 0),
-            "threat_pct":      round((total - clean_flows) / total * 100, 1),
+            "uncertain":       self._stats.get("UNCERTAIN", 0),
+            "threat_pct":      round((
+                self._stats.get("CRITICAL", 0)
+                + self._stats.get("HIGH", 0)
+                + self._stats.get("MEDIUM", 0)
+            ) / total * 100, 1),
             "clean_pct":       round(clean_flows / total * 100, 1),
             "packets_per_sec": len(self._pkt_ts_window),
             "attack_types":    dict(self._attack_counts),

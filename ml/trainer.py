@@ -14,6 +14,7 @@ Models trained:
   2. Isolation Forest — unsupervised, zero-day anomaly detection
 """
 
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -26,6 +27,27 @@ from sklearn.metrics import (
 )
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
+MODEL_REVISION = 6
+
+NSL_KDD_COLUMNS = [
+    "duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes",
+    "land", "wrong_fragment", "urgent", "hot", "num_failed_logins",
+    "logged_in", "num_compromised", "root_shell", "su_attempted", "num_root",
+    "num_file_creations", "num_shells", "num_access_files", "num_outbound_cmds",
+    "is_host_login", "is_guest_login", "count", "srv_count", "serror_rate",
+    "srv_serror_rate", "rerror_rate", "srv_rerror_rate", "same_srv_rate",
+    "diff_srv_rate", "srv_diff_host_rate", "dst_host_count", "dst_host_srv_count",
+    "dst_host_same_srv_rate", "dst_host_diff_srv_rate",
+    "dst_host_same_src_port_rate", "dst_host_srv_serror_rate",
+    "dst_host_srv_rerror_rate", "dst_host_srv_diff_host_rate",
+    "dst_host_serror_rate", "dst_host_rerror_rate", "label", "difficulty",
+]
+
+NSL_SERVICE_PORTS = {
+    "ftp_data": 20, "ftp": 21, "ssh": 22, "telnet": 23, "smtp": 25,
+    "domain": 53, "http": 80, "pop_3": 110, "sunrpc": 111,
+    "auth": 113, "imap4": 143, "ldap": 389, "https": 443,
+}
 
 FEATURE_NAMES = [
     "duration", "protocol_type", "src_bytes", "dst_bytes",
@@ -86,8 +108,8 @@ def _rng(seed):
 
 def _make_normal(n):
     r = _rng(0)
-    return {
-        "duration":r.exponential(30,n),"protocol_type":r.choice([0,1,2],n,p=[0.6,0.35,0.05]),
+    data = {
+        "duration":r.lognormal(-1.2,1.0,n).clip(0.001,20.0),"protocol_type":r.choice([0,1,2],n,p=[0.6,0.35,0.05]),
         "src_bytes":r.lognormal(8,2,n),"dst_bytes":r.lognormal(9,2,n),
         "wrong_fragment":__import__('numpy').zeros(n),"urgent":__import__('numpy').zeros(n),
         "count":r.integers(1,50,n),"srv_count":r.integers(1,30,n),
@@ -100,17 +122,46 @@ def _make_normal(n):
         "flag_fin_ratio":r.uniform(0,0.3,n),"flag_rst_ratio":r.uniform(0,0.1,n),
         "port_number":r.choice([80,443,22,25,53,8080],n),"is_well_known_port":__import__('numpy').ones(n),
     }
+    discovery = r.random(n) < 0.25
+    discovery_count = int(discovery.sum())
+    if discovery_count:
+        discovery_duration = r.lognormal(-0.2, 1.0, discovery_count).clip(0.05, 30.0)
+        recent = r.random(discovery_count) < 0.6
+        host_count = r.integers(1, 8, discovery_count)
+        data["duration"][discovery] = discovery_duration
+        data["protocol_type"][discovery] = 1
+        data["src_bytes"][discovery] = r.lognormal(np.log(180), 0.8, discovery_count)
+        data["dst_bytes"][discovery] = 0
+        data["wrong_fragment"][discovery] = 0
+        data["urgent"][discovery] = 0
+        data["count"][discovery] = np.where(recent, r.integers(1, 6, discovery_count), 0)
+        data["srv_count"][discovery] = np.where(recent, r.integers(1, 6, discovery_count), 1)
+        data["serror_rate"][discovery] = 0
+        data["rerror_rate"][discovery] = 0
+        data["same_srv_rate"][discovery] = recent.astype(float)
+        data["diff_srv_rate"][discovery] = 0
+        data["dst_host_count"][discovery] = host_count
+        data["dst_host_srv_count"][discovery] = host_count
+        data["dst_host_same_srv_rate"][discovery] = 1
+        data["dst_host_diff_srv_rate"][discovery] = 0
+        data["dst_host_serror_rate"][discovery] = 0
+        data["flag_syn_ratio"][discovery] = 0
+        data["flag_fin_ratio"][discovery] = 0
+        data["flag_rst_ratio"][discovery] = 0
+        data["port_number"][discovery] = r.choice([1900, 5353, 5355], discovery_count)
+        data["is_well_known_port"][discovery] = 0
+    return data
 
 def _make_dos(n):
     r = _rng(1)
     return {
-        "duration":r.exponential(1,n),"protocol_type":r.choice([0,2],n,p=[0.7,0.3]),
+        "duration":r.uniform(0.001,0.01,n),"protocol_type":__import__('numpy').zeros(n),
         "src_bytes":r.lognormal(5,1,n),"dst_bytes":r.lognormal(4,1,n),
-        "wrong_fragment":r.integers(0,5,n).astype(float),"urgent":__import__('numpy').zeros(n),
-        "count":r.integers(200,512,n),"srv_count":r.integers(200,512,n),
+        "wrong_fragment":__import__('numpy').zeros(n),"urgent":__import__('numpy').zeros(n),
+        "count":r.integers(80,160,n),"srv_count":r.integers(80,160,n),
         "serror_rate":r.uniform(0.85,1.0,n),"rerror_rate":r.uniform(0,0.1,n),
         "same_srv_rate":r.uniform(0.9,1.0,n),"diff_srv_rate":r.uniform(0,0.05,n),
-        "dst_host_count":r.integers(240,255,n),"dst_host_srv_count":r.integers(230,255,n),
+        "dst_host_count":r.integers(80,160,n),"dst_host_srv_count":r.integers(80,160,n),
         "dst_host_same_srv_rate":r.uniform(0.95,1.0,n),"dst_host_diff_srv_rate":r.uniform(0,0.05,n),
         "dst_host_serror_rate":r.uniform(0.85,1.0,n),"packet_rate":r.uniform(2000,15000,n),
         "byte_rate":r.uniform(50000,200000,n),"flag_syn_ratio":r.uniform(0.8,1.0,n),
@@ -122,13 +173,13 @@ def _make_ddos(n):
     """DDoS: multi-source, even higher volume, amplification patterns."""
     r = _rng(2)
     return {
-        "duration":r.exponential(0.5,n),"protocol_type":r.choice([0,1,2],n,p=[0.4,0.4,0.2]),
+        "duration":r.uniform(0.001,0.01,n),"protocol_type":__import__('numpy').zeros(n),
         "src_bytes":r.lognormal(4,1,n),"dst_bytes":r.lognormal(3,1,n),
         "wrong_fragment":r.integers(0,8,n).astype(float),"urgent":__import__('numpy').zeros(n),
-        "count":r.integers(400,512,n),"srv_count":r.integers(350,512,n),
+        "count":r.integers(170,260,n),"srv_count":r.integers(160,250,n),
         "serror_rate":r.uniform(0.9,1.0,n),"rerror_rate":r.uniform(0,0.05,n),
         "same_srv_rate":r.uniform(0.95,1.0,n),"diff_srv_rate":r.uniform(0,0.03,n),
-        "dst_host_count":r.integers(250,255,n),"dst_host_srv_count":r.integers(245,255,n),
+        "dst_host_count":r.integers(170,260,n),"dst_host_srv_count":r.integers(160,250,n),
         "dst_host_same_srv_rate":r.uniform(0.98,1.0,n),"dst_host_diff_srv_rate":r.uniform(0,0.02,n),
         "dst_host_serror_rate":r.uniform(0.9,1.0,n),"packet_rate":r.uniform(10000,50000,n),
         "byte_rate":r.uniform(200000,1000000,n),"flag_syn_ratio":r.uniform(0.85,1.0,n),
@@ -177,13 +228,13 @@ def _make_brute_force(n):
     """Brute Force: repeated auth attempts to SSH/FTP/HTTP — same service, many tries."""
     r = _rng(5)
     return {
-        "duration":r.exponential(60,n),"protocol_type":__import__('numpy').zeros(n),
-        "src_bytes":r.lognormal(6,1,n),"dst_bytes":r.lognormal(8,1,n),
+        "duration":r.exponential(0.1,n),"protocol_type":__import__('numpy').zeros(n),
+        "src_bytes":r.lognormal(8,1,n),"dst_bytes":r.lognormal(6,1,n),
         "wrong_fragment":__import__('numpy').zeros(n),"urgent":__import__('numpy').zeros(n),
         "count":r.integers(50,300,n),"srv_count":r.integers(50,300,n),
         "serror_rate":r.uniform(0,0.2,n),"rerror_rate":r.uniform(0.3,0.8,n),
         "same_srv_rate":r.uniform(0.85,1.0,n),"diff_srv_rate":r.uniform(0,0.1,n),
-        "dst_host_count":r.integers(1,5,n),"dst_host_srv_count":r.integers(50,300,n),
+        "dst_host_count":r.integers(50,255,n),"dst_host_srv_count":r.integers(50,300,n),
         "dst_host_same_srv_rate":r.uniform(0.9,1.0,n),"dst_host_diff_srv_rate":r.uniform(0,0.05,n),
         "dst_host_serror_rate":r.uniform(0,0.2,n),"packet_rate":r.uniform(5,80,n),
         "byte_rate":r.uniform(1000,15000,n),"flag_syn_ratio":r.uniform(0.1,0.4,n),
@@ -196,7 +247,7 @@ def _make_exploit(n):
     """Exploit: buffer overflow/shellcode — large payload, single connection."""
     r = _rng(6)
     return {
-        "duration":r.exponential(150,n),"protocol_type":__import__('numpy').zeros(n),
+        "duration":r.exponential(5,n),"protocol_type":__import__('numpy').zeros(n),
         "src_bytes":r.lognormal(11,1,n),"dst_bytes":r.lognormal(9,1,n),
         "wrong_fragment":__import__('numpy').zeros(n),"urgent":r.integers(0,6,n).astype(float),
         "count":r.integers(1,8,n),"srv_count":r.integers(1,5,n),
@@ -215,13 +266,13 @@ def _make_web_attack(n):
     """Web Attack: SQLi/XSS — port 80/443, crafted payloads in HTTP."""
     r = _rng(7)
     return {
-        "duration":r.exponential(5,n),"protocol_type":__import__('numpy').zeros(n),
+        "duration":r.exponential(0.1,n),"protocol_type":__import__('numpy').zeros(n),
         "src_bytes":r.lognormal(7,1,n),"dst_bytes":r.lognormal(8,1,n),
         "wrong_fragment":__import__('numpy').zeros(n),"urgent":__import__('numpy').zeros(n),
         "count":r.integers(10,100,n),"srv_count":r.integers(10,100,n),
         "serror_rate":r.uniform(0,0.15,n),"rerror_rate":r.uniform(0.1,0.4,n),
         "same_srv_rate":r.uniform(0.7,1.0,n),"diff_srv_rate":r.uniform(0,0.2,n),
-        "dst_host_count":r.integers(1,10,n),"dst_host_srv_count":r.integers(10,100,n),
+        "dst_host_count":r.integers(10,100,n),"dst_host_srv_count":r.integers(10,100,n),
         "dst_host_same_srv_rate":r.uniform(0.8,1.0,n),"dst_host_diff_srv_rate":r.uniform(0,0.1,n),
         "dst_host_serror_rate":r.uniform(0,0.15,n),"packet_rate":r.uniform(2,50,n),
         "byte_rate":r.uniform(2000,30000,n),"flag_syn_ratio":r.uniform(0.05,0.25,n),
@@ -233,9 +284,9 @@ def _make_infiltration(n):
     """Infiltration/Backdoor: persistent low-traffic covert channel."""
     r = _rng(8)
     return {
-        "duration":r.exponential(300,n),"protocol_type":__import__('numpy').zeros(n),
+        "duration":r.exponential(3,n),"protocol_type":__import__('numpy').zeros(n),
         "src_bytes":r.lognormal(7,1,n),"dst_bytes":r.lognormal(6,1,n),
-        "wrong_fragment":__import__('numpy').zeros(n),"urgent":r.integers(0,2,n).astype(float),
+        "wrong_fragment":__import__('numpy').zeros(n),"urgent":__import__('numpy').zeros(n),
         "count":r.integers(1,10,n),"srv_count":r.integers(1,5,n),
         "serror_rate":r.uniform(0,0.05,n),"rerror_rate":r.uniform(0,0.05,n),
         "same_srv_rate":r.uniform(0.6,1.0,n),"diff_srv_rate":r.uniform(0,0.15,n),
@@ -243,7 +294,7 @@ def _make_infiltration(n):
         "dst_host_same_srv_rate":r.uniform(0.7,1.0,n),"dst_host_diff_srv_rate":r.uniform(0,0.1,n),
         "dst_host_serror_rate":r.uniform(0,0.05,n),"packet_rate":r.uniform(0.5,10,n),
         "byte_rate":r.uniform(500,20000,n),"flag_syn_ratio":r.uniform(0,0.15,n),
-        "flag_fin_ratio":r.uniform(0.4,0.8,n),"flag_rst_ratio":r.uniform(0,0.1,n),
+        "flag_fin_ratio":r.uniform(0,0.15,n),"flag_rst_ratio":r.uniform(0,0.1,n),
         "port_number":r.choice([4444,5555,6666,31337,8888,9999,1337],n),
         "is_well_known_port":__import__('numpy').zeros(n),  # Non-standard ports
     }
@@ -252,8 +303,8 @@ def _make_exfiltration(n):
     """Exfiltration: large outbound data transfers — high byte_rate, big dst_bytes."""
     r = _rng(9)
     return {
-        "duration":r.exponential(120,n),"protocol_type":__import__('numpy').zeros(n),
-        "src_bytes":r.lognormal(7,1,n),"dst_bytes":r.lognormal(14,1,n),  # Very high
+        "duration":r.exponential(0.8,n),"protocol_type":__import__('numpy').zeros(n),
+        "src_bytes":r.lognormal(14,1,n),"dst_bytes":r.lognormal(7,1,n),
         "wrong_fragment":__import__('numpy').zeros(n),"urgent":__import__('numpy').zeros(n),
         "count":r.integers(1,20,n),"srv_count":r.integers(1,10,n),
         "serror_rate":r.uniform(0,0.1,n),"rerror_rate":r.uniform(0,0.1,n),
@@ -284,14 +335,25 @@ def generate_synthetic_dataset(n_per_class: int = 2000) -> tuple:
         "exfiltration":_make_exfiltration,
     }
     dfs, labels = [], []
+    discrete_features = {
+        "protocol_type", "wrong_fragment", "urgent", "count", "srv_count",
+        "dst_host_count", "dst_host_srv_count",
+    }
     for cls, builder in builders.items():
         d   = builder(n_per_class)
         df  = pd.DataFrame(d, columns=FEATURE_NAMES)
         # Add small Gaussian noise
         for col in FEATURE_NAMES[:-2]:
+            if col in discrete_features:
+                continue
             std = df[col].std()
             if std > 0:
                 df[col] += np.random.normal(0, std * 0.02, n_per_class)
+        df["packet_rate"] = df["count"] / 2.0
+        df["byte_rate"] = (
+            (df["src_bytes"] + df["dst_bytes"])
+            / df["duration"].clip(lower=1.0)
+        )
         df = df.clip(lower=0)
         dfs.append(df)
         labels.extend([cls] * n_per_class)
@@ -356,6 +418,8 @@ class NIDSTrainer:
 
     def load(self) -> bool:
         """Load persisted models. Returns False if not found."""
+        if not self._model_metadata_is_current():
+            return False
         try:
             self.rf_model  = joblib.load(f"{self.model_dir}/rf.pkl")
             self.iso_model = joblib.load(f"{self.model_dir}/iso.pkl")
@@ -366,21 +430,28 @@ class NIDSTrainer:
             return False
 
     def models_exist(self) -> bool:
-        return all(
+        return self._model_metadata_is_current() and all(
             os.path.exists(f"{self.model_dir}/{f}")
             for f in ["rf.pkl","iso.pkl","scaler.pkl","label_enc.pkl"]
+        )
+
+    def _model_metadata_is_current(self) -> bool:
+        metadata_path = os.path.join(self.model_dir, "model_metadata.json")
+        try:
+            with open(metadata_path, encoding="utf-8") as metadata_file:
+                metadata = json.load(metadata_file)
+        except (OSError, json.JSONDecodeError):
+            return False
+        return (
+            metadata.get("revision") == MODEL_REVISION
+            and metadata.get("features") == FEATURE_NAMES
         )
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _load_data(self, path, n_per_class):
         if path and os.path.exists(path):
-            # Expects NSL-KDD KDDTrain+.txt format
-            cols = FEATURE_NAMES + ["label", "difficulty"]
-            df = pd.read_csv(path, names=cols)
-            X  = df[FEATURE_NAMES]
-            y  = df["label"].map(self._nsl_label_map()).fillna("normal")
-            return X, y
+            return _load_nsl_kdd(path)
         return generate_synthetic_dataset(n_per_class)
 
     @staticmethod
@@ -456,6 +527,48 @@ class NIDSTrainer:
         joblib.dump(self.iso_model, f"{self.model_dir}/iso.pkl")
         joblib.dump(self.scaler,    f"{self.model_dir}/scaler.pkl")
         joblib.dump(self.label_enc, f"{self.model_dir}/label_enc.pkl")
+        with open(os.path.join(self.model_dir, "model_metadata.json"), "w", encoding="utf-8") as metadata_file:
+            json.dump({"revision": MODEL_REVISION, "features": FEATURE_NAMES}, metadata_file)
+
+
+def _load_nsl_kdd(path: str) -> tuple:
+    """Project the native 41 NSL-KDD fields onto the runtime feature contract."""
+    frame = pd.read_csv(path, names=NSL_KDD_COLUMNS, low_memory=False)
+    protocol_codes = {"tcp": 0.0, "udp": 1.0, "icmp": 2.0}
+    flag_syn_ratio = {
+        "SF": 0.1, "S0": 1.0, "S1": 0.5, "S2": 0.33, "S3": 0.25,
+        "SH": 0.5,
+    }
+    flag_fin_ratio = {"SF": 0.1, "S2": 0.33, "S3": 0.25}
+    flag_rst_ratio = {"REJ": 1.0, "RSTO": 0.5, "RSTR": 0.5, "SH": 0.5}
+
+    features = pd.DataFrame(index=frame.index)
+    for name in (
+        "duration", "src_bytes", "dst_bytes", "wrong_fragment", "urgent",
+        "count", "srv_count", "serror_rate", "rerror_rate", "same_srv_rate",
+        "diff_srv_rate", "dst_host_count", "dst_host_srv_count",
+        "dst_host_same_srv_rate", "dst_host_diff_srv_rate", "dst_host_serror_rate",
+    ):
+        features[name] = pd.to_numeric(frame[name], errors="coerce")
+
+    features["protocol_type"] = frame["protocol_type"].str.lower().map(protocol_codes)
+    features["port_number"] = frame["service"].str.lower().map(NSL_SERVICE_PORTS).fillna(0)
+    flags = frame["flag"].str.upper()
+    features["flag_syn_ratio"] = flags.map(flag_syn_ratio).fillna(0.0)
+    features["flag_fin_ratio"] = flags.map(flag_fin_ratio).fillna(0.0)
+    features["flag_rst_ratio"] = flags.map(flag_rst_ratio).fillna(0.0)
+    features["packet_rate"] = features["count"] / 2.0
+    features["byte_rate"] = (
+        (features["src_bytes"] + features["dst_bytes"])
+        / features["duration"].clip(lower=1.0)
+    )
+    features["is_well_known_port"] = (
+        (features["port_number"] > 0) & (features["port_number"] < 1024)
+    ).astype(float)
+    features = features[FEATURE_NAMES].apply(pd.to_numeric, errors="coerce")
+    features = features.replace([np.inf, -np.inf], 0).fillna(0).clip(lower=0)
+    labels = frame["label"].str.strip().str.lower().map(NIDSTrainer._nsl_label_map()).fillna("normal")
+    return features, labels
 
 
 # ─── Multi-Dataset Loader (added) ────────────────────────────────────────────
@@ -718,12 +831,7 @@ def auto_load_dataset(path: str) -> tuple:
 
     if "kdd" in name or "nsl" in name:
         print(f"[*] Detected: NSL-KDD format")
-        cols = FEATURE_NAMES + ["label", "difficulty"]
-        df = pd.read_csv(path, names=cols, low_memory=False)
-        X  = df[FEATURE_NAMES].fillna(0).clip(lower=0)
-        from ml.trainer import NIDSTrainer
-        y  = df["label"].map(NIDSTrainer._nsl_label_map()).fillna("normal")
-        return X, y
+        return _load_nsl_kdd(path)
 
     elif "unsw" in name or "nb15" in name:
         print(f"[*] Detected: UNSW-NB15 format")
@@ -737,12 +845,7 @@ def auto_load_dataset(path: str) -> tuple:
         # Try NSL-KDD format first (most common)
         print(f"[*] Unknown format — trying NSL-KDD parser")
         try:
-            cols = FEATURE_NAMES + ["label", "difficulty"]
-            df = pd.read_csv(path, names=cols, low_memory=False)
-            X  = df[FEATURE_NAMES].fillna(0).clip(lower=0)
-            from ml.trainer import NIDSTrainer
-            y  = df["label"].map(NIDSTrainer._nsl_label_map()).fillna("normal")
-            return X, y
+            return _load_nsl_kdd(path)
         except Exception:
             print(f"[!] Could not parse {path} — using synthetic data")
             return generate_synthetic_dataset()

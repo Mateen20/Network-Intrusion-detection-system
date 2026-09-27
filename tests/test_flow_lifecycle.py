@@ -1,3 +1,5 @@
+import time
+
 from core.flow_tracker import FLOW_TIMEOUT, FlowTracker
 from ml.trainer import FEATURE_NAMES
 
@@ -56,6 +58,61 @@ def test_expired_flow_is_collected_once():
 
     assert len(tracker.collect_expired()) == 1
     assert tracker.collect_expired() == []
+
+
+def test_reappearing_tuple_completes_old_flow_before_starting_new_flow():
+    tracker = FlowTracker()
+    tracker.process_packet(packet(120))
+    old_flow = next(iter(tracker._flows.values()))
+    old_flow.last_seen -= FLOW_TIMEOUT + 1
+
+    returned = tracker.process_packet(packet(80))
+
+    assert returned is old_flow
+    assert tracker.active_count() == 1
+    completed = tracker.collect_expired()
+    assert len(completed) == 1
+    assert completed[0][0] is old_flow
+    assert completed[0][1]["src_bytes"] == 120.0
+    assert tracker.collect_expired() == []
+
+
+def test_response_first_flow_uses_initiator_to_service_feature_direction():
+    tracker = FlowTracker()
+    timestamp = time.time()
+    tracker.process_packet({
+        "src_ip": "93.184.216.34",
+        "dst_ip": "192.168.1.10",
+        "src_port": 443,
+        "dst_port": 52000,
+        "protocol": 0,
+        "size": 1200,
+        "flags": {"ACK": True},
+        "ts": timestamp,
+    })
+    tracker.process_packet({
+        "src_ip": "192.168.1.10",
+        "dst_ip": "93.184.216.34",
+        "src_port": 52000,
+        "dst_port": 443,
+        "protocol": 0,
+        "size": 400,
+        "flags": {"ACK": True},
+        "ts": timestamp + 0.1,
+    })
+
+    flow = next(iter(tracker._flows.values()))
+    assert flow.src_ip == "192.168.1.10"
+    assert flow.src_port == 52000
+    assert flow.dst_ip == "93.184.216.34"
+    assert flow.dst_port == 443
+
+    flow.last_seen -= FLOW_TIMEOUT + 1
+    _, features = tracker.collect_expired()[0]
+    assert features["src_bytes"] == 400.0
+    assert features["dst_bytes"] == 1200.0
+    assert features["port_number"] == 443.0
+    assert features["is_well_known_port"] == 1.0
 
 
 def test_collected_flow_has_canonical_features():

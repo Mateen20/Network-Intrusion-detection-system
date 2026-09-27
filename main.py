@@ -210,26 +210,31 @@ def cmd_run(args):
     alert_mgr  = AlertManager()
     flow_track = FlowTracker()
     debug_enabled = getattr(args, "debug", False)
+    flow_processing_lock = threading.RLock()
+
+    def process_expired_flows():
+        with flow_processing_lock:
+            expired_flows = flow_track.collect_expired()
+            for flow, features in expired_flows:
+                if debug_enabled:
+                    debug = flow_track.get_last_feature_debug()
+                    if debug:
+                        print(f"[debug] flow={flow.src_ip}:{flow.src_port}->{flow.dst_ip}:{flow.dst_port} features={debug['stats']} | {features}")
+
+                detection   = detector.predict(features)
+                explanation = explainer.explain(features)
+                alert       = alert_mgr.add(flow, detection, explanation)
+                if alert and alert.severity in ("CRITICAL", "HIGH"):
+                    console.print(
+                        f"  [{_sev_clr(alert.severity)}]{alert.severity}[/]  "
+                        f"{alert.label:10s}  {alert.src_ip} → {alert.dst_ip}"
+                    )
 
     # ── Packet callback ──────────────────────────────────────────────────────
     def on_packet(pkt_info: dict):
         alert_mgr.record_packet()
         flow_track.process_packet(pkt_info)
-
-        for flow, features in flow_track.collect_expired():
-            if debug_enabled:
-                debug = flow_track.get_last_feature_debug()
-                if debug:
-                    print(f"[debug] flow={flow.src_ip}:{flow.src_port}->{flow.dst_ip}:{flow.dst_port} features={debug['stats']} | {features}")
-
-            detection   = detector.predict(features)
-            explanation = explainer.explain(features)
-            alert       = alert_mgr.add(flow, detection, explanation)
-            if alert and alert.severity in ("CRITICAL","HIGH"):
-                console.print(
-                    f"  [{_sev_clr(alert.severity)}]{alert.severity}[/]  "
-                    f"{alert.label:10s}  {alert.src_ip} → {alert.dst_ip}"
-                )
+        process_expired_flows()
 
     # ── Capture ──────────────────────────────────────────────────────────────
     mode    = getattr(args, "mode",  "simulate")
@@ -280,6 +285,7 @@ def cmd_run(args):
     try:
         while capture.is_running:
             time.sleep(5)
+            process_expired_flows()
             s = alert_mgr.dashboard_stats()
             console.print(
                 f"  [dim]{_uptime(start_time)}[/dim]  "
@@ -293,6 +299,7 @@ def cmd_run(args):
         console.print("\n[yellow]Stopping capture…[/yellow]")
     finally:
         capture.stop()
+        process_expired_flows()
 
     if capture.error:
         console.print(f"[bold red]Capture stopped:[/bold red] {capture.error}")

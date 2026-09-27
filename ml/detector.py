@@ -32,16 +32,12 @@ def calibrate_severity(label: str, confidence: float,
                        anomaly_score: float = 0.0) -> tuple[str, str]:
     """Return the effective class and evidence-gated alert severity."""
     effective_label = label
-    if label == "normal" and is_anomaly and anomaly_score < -0.15:
-        effective_label = "port_scan"
-        confidence = max(confidence, 0.55)
+    if label == "normal":
         severity = (
-            "MEDIUM"
-            if confidence >= CONFIDENCE_THRESHOLDS["medium"]
-            else "UNCERTAIN"
+            "UNCERTAIN"
+            if is_anomaly and anomaly_score < -0.15
+            else "CLEAN"
         )
-    elif label == "normal":
-        severity = "CLEAN"
     else:
         predicted_severity = SEVERITY_MAP.get(label, "CLEAN")
         if confidence < CONFIDENCE_THRESHOLDS["uncertain"]:
@@ -74,6 +70,12 @@ class NIDSDetector:
         self.scaler    = trainer.scaler
         self.label_enc = trainer.label_enc
         self.modern    = modern   # ModernThreatDetector instance or None
+        if self.rf is not None:
+            self.rf.n_jobs = 1
+        if self.iso is not None:
+            self.iso.n_jobs = 1
+        if self.modern is not None and self.modern.rf_model is not None:
+            self.modern.rf_model.n_jobs = 1
 
     # ── Public API ────────────────────────────────────────────────────────────
 
