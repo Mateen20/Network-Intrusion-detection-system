@@ -8,18 +8,18 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg:        #040d1a;
-    --card:      #071428;
-    --border:    #0e2a4a;
-    --accent:    #0ea5e9;
-    --accent2:   #38bdf8;
-    --green:     #10b981;
-    --red:       #ef4444;
-    --amber:     #f59e0b;
-    --blue:      #3b82f6;
-    --text:      #e2e8f0;
+    --bg:        #f8fafc;
+    --card:      #ffffff;
+    --border:    #dbe3ec;
+    --accent:    #0369a1;
+    --accent2:   #0369a1;
+    --green:     #047857;
+    --red:       #dc2626;
+    --amber:     #b45309;
+    --blue:      #2563eb;
+    --text:      #1e293b;
     --muted:     #64748b;
-    --live:      #39ff14;
+    --live:      #15803d;
     --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
     --font-ui:   'Inter', system-ui, sans-serif;
   }
@@ -39,8 +39,8 @@
     position: fixed;
     inset: 0;
     background-image:
-      linear-gradient(rgba(14,165,233,.04) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(14,165,233,.04) 1px, transparent 1px);
+      linear-gradient(rgba(14,165,233,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(14,165,233,.025) 1px, transparent 1px);
     background-size: 40px 40px;
     pointer-events: none;
     z-index: 0;
@@ -258,7 +258,6 @@
     font-size: 11px; font-weight: 700;
     letter-spacing: .08em;
     color: var(--ring-clr, var(--accent));
-    text-shadow: 0 0 8px var(--ring-clr, var(--accent));
   }
   .threat-level.CRITICAL { --ring-clr: var(--red); }
   .threat-level.HIGH     { --ring-clr: var(--amber); }
@@ -301,10 +300,10 @@
     font-size: 10px; font-weight: 700;
     letter-spacing: .05em;
   }
-  .sev-CRITICAL { background: rgba(239,68,68,.2);  color: #ef4444; }
-  .sev-HIGH     { background: rgba(245,158,11,.2); color: #f59e0b; }
-  .sev-MEDIUM   { background: rgba(59,130,246,.2); color: #3b82f6; }
-  .sev-LOW      { background: rgba(16,185,129,.2); color: #10b981; }
+  .sev-CRITICAL { background: rgba(239,68,68,.12);  color: #b91c1c; }
+  .sev-HIGH     { background: rgba(245,158,11,.14); color: #92400e; }
+  .sev-MEDIUM   { background: rgba(59,130,246,.12); color: #1d4ed8; }
+  .sev-LOW      { background: rgba(16,185,129,.12); color: #047857; }
   .sev-CLEAN    { background: rgba(107,114,128,.15); color: #6b7280; }
   .alert-ts  { color: var(--muted); font-size: 10px; }
   .alert-label { font-weight: 700; }
@@ -627,7 +626,7 @@ const trafficChart = new Chart(
         x: { display: false },
         y: {
           beginAtZero: true,
-          grid: { color: 'rgba(255,255,255,.04)' },
+          grid: { color: 'rgba(15,23,42,.09)' },
           ticks: { color: '#64748b', font: { size: 10 } },
         },
       },
@@ -670,8 +669,8 @@ const attackChart = new Chart(
       cutout: '62%',
       plugins: {
         legend: {
-          position: 'bottom',
-          labels: { color: '#94a3b8', font: { size: 9 }, padding: 6, boxWidth: 10 },
+          position: 'right',
+          labels: { color: '#475569', font: { size: 9 }, padding: 6, boxWidth: 10 },
         },
       },
       animation: { duration: 400 },
