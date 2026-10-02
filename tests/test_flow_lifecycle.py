@@ -127,3 +127,49 @@ def test_collected_flow_has_canonical_features():
     assert len(features) == 24
     assert features["src_bytes"] == 200.0
     assert features["port_number"] == 443.0
+
+
+def _collect_host_error_features(connection_count, failed_count):
+    tracker = FlowTracker()
+    timestamp = time.time()
+    for index in range(connection_count):
+        flags = (
+            {"SYN": True, "ACK": False, "FIN": False, "RST": False, "URG": False}
+            if index < failed_count
+            else {"SYN": False, "ACK": True, "FIN": False, "RST": False, "URG": False}
+        )
+        tracker.process_packet({
+            "src_ip": "192.168.1.10",
+            "dst_ip": "192.168.1.1",
+            "src_port": 50000 + index,
+            "dst_port": 443,
+            "protocol": 0,
+            "size": 66,
+            "flags": flags,
+            "ts": timestamp,
+        })
+
+    for flow in tracker._flows.values():
+        duration = flow.duration
+        flow.last_seen = time.time() - FLOW_TIMEOUT - 1
+        flow.start_time = flow.last_seen - duration
+
+    return tracker.collect_expired()
+
+
+def test_single_incomplete_syn_does_not_mark_host_aggregate_fully_failed():
+    completed = _collect_host_error_features(connection_count=60, failed_count=1)
+
+    assert len(completed) == 60
+    assert all(features["serror_rate"] == 1.0 for flow, features in completed if flow.syn_count)
+    assert all(features["dst_host_serror_rate"] < 1.0 for _, features in completed)
+
+
+def test_host_serror_rate_is_failed_connections_over_host_connections():
+    completed = _collect_host_error_features(connection_count=60, failed_count=1)
+
+    assert all(
+        features["dst_host_serror_rate"] == 1 / 60
+        for _, features in completed
+    )
+    assert all(list(features) == FEATURE_NAMES for _, features in completed)

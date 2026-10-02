@@ -22,6 +22,7 @@ __pycache__/
 # Reports
 reports/*.pdf
 reports/*.json
+debug/live_confirmed_alerts.jsonl
 
 # IDE
 .vscode/

@@ -210,6 +210,7 @@ def cmd_run(args):
     alert_mgr  = AlertManager()
     flow_track = FlowTracker()
     debug_enabled = getattr(args, "debug", False)
+    diagnostic_writer = None
     flow_processing_lock = threading.RLock()
 
     def process_expired_flows():
@@ -224,6 +225,11 @@ def cmd_run(args):
                 detection   = detector.predict(features)
                 explanation = explainer.explain(features)
                 alert       = alert_mgr.add(flow, detection, explanation)
+                if diagnostic_writer is not None:
+                    try:
+                        diagnostic_writer.record(flow, features, detection, alert)
+                    except Exception as exc:
+                        console.print(f"[yellow]Live diagnostic write failed: {exc}[/yellow]")
                 if alert and alert.severity in ("CRITICAL", "HIGH"):
                     console.print(
                         f"  [{_sev_clr(alert.severity)}]{alert.severity}[/]  "
@@ -241,6 +247,10 @@ def cmd_run(args):
     iface   = getattr(args, "iface", "eth0")
     port    = getattr(args, "port",  5000)
     no_dash = getattr(args, "no_dashboard", False)
+
+    if mode == "live":
+        from core.live_diagnostics import LiveConfirmedDiagnosticWriter
+        diagnostic_writer = LiveConfirmedDiagnosticWriter()
 
     capture = PacketCapture(mode=mode, interface=iface, callback=on_packet)
 

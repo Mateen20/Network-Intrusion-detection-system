@@ -208,11 +208,17 @@ class FlowTracker:
             for flow in completed:
                 if flow.connection_record is not None and flow.syn_count and not flow.syn_ack_count:
                     flow.connection_record["failed"] = True
+
+            for flow in completed:
                 stats = dict(flow.connection_stats)
-                if flow.connection_record is not None and flow.connection_record["failed"]:
-                    stats["dst_host_serror_rate"] = max(
-                        stats.get("dst_host_serror_rate", 0.0), 1.0
-                    )
+                host_connections = [
+                    connection for connection in self._connection_history
+                    if connection["dst_ip"] == flow.dst_ip
+                ]
+                stats["dst_host_serror_rate"] = (
+                    sum(connection["failed"] for connection in host_connections)
+                    / max(len(host_connections), 1)
+                )
                 features = flow.to_features(stats)
                 self.last_feature_vector = features
                 self.last_feature_debug = {"flow": flow.__dict__.copy(), "stats": stats}

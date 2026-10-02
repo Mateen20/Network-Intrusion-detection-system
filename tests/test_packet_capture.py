@@ -167,6 +167,67 @@ def test_simulation_uses_real_detector_pipeline_without_injected_labels(tmp_path
     assert trainer.scaler.feature_names_in_.tolist() == FEATURE_NAMES
     detector = NIDSDetector(trainer)
 
+    captured_features = dict(zip(FEATURE_NAMES, [
+        0.001, 0.0, 66.0, 0.0, 0.0, 0.0, 4.0, 4.0,
+        1.0, 0.0, 1.0, 0.0, 60.0, 57.0, 0.95, 0.05,
+        1.0, 2.0, 66.0, 1.0, 0.0, 0.0, 53.0, 1.0,
+    ]))
+    corrected_capture_features = dict(captured_features)
+    corrected_capture_features["dst_host_serror_rate"] = 1.0 / 60.0
+    corrected_detection = detector.predict(corrected_capture_features)
+    assert list(corrected_capture_features) == FEATURE_NAMES
+    assert corrected_detection["severity"] in {"CLEAN", "UNCERTAIN"}
+    assert corrected_detection["severity"] not in {"MEDIUM", "HIGH", "CRITICAL"}
+    if corrected_detection["severity"] == "CLEAN":
+        assert corrected_detection["label"] == "normal"
+
+    def dns_detection(protocol):
+        tracker = FlowTracker()
+        timestamp = time.time()
+        client_ip = "10.0.0.25"
+        resolver_ip = "203.0.113.53"
+        client_port = 53500 + protocol
+        if protocol == 0:
+            packets = [
+                (client_ip, resolver_ip, client_port, 53, 60, {"SYN": True}, 0.0),
+                (resolver_ip, client_ip, 53, client_port, 60, {"SYN": True, "ACK": True}, 0.01),
+                (client_ip, resolver_ip, client_port, 53, 52, {"ACK": True}, 0.02),
+                (client_ip, resolver_ip, client_port, 53, 72, {"ACK": True}, 0.03),
+                (resolver_ip, client_ip, 53, client_port, 104, {"ACK": True}, 0.04),
+            ]
+        else:
+            packets = [
+                (client_ip, resolver_ip, client_port, 53, 71, {}, 0.0),
+                (resolver_ip, client_ip, 53, client_port, 125, {}, 0.02),
+            ]
+
+        for src_ip, dst_ip, src_port, dst_port, size, flags, offset in packets:
+            tracker.process_packet({
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "src_port": src_port,
+                "dst_port": dst_port,
+                "protocol": protocol,
+                "size": size,
+                "flags": flags,
+                "ts": timestamp + offset,
+            })
+
+        flow = next(iter(tracker._flows.values()))
+        duration = flow.duration
+        flow.last_seen = time.time() - FLOW_TIMEOUT - 1
+        flow.start_time = flow.last_seen - duration
+        _, features = tracker.collect_expired()[0]
+        assert list(features) == FEATURE_NAMES
+        assert features["port_number"] == 53.0
+        assert features["protocol_type"] == float(protocol)
+        return detector.predict(features)
+
+    for dns_result in (dns_detection(0), dns_detection(1)):
+        assert (
+            dns_result["label"] == "normal" and dns_result["severity"] == "CLEAN"
+        ) or dns_result["severity"] == "UNCERTAIN"
+
     response_first_tracker = FlowTracker()
     timestamp = time.time()
     response_first_packets = [
